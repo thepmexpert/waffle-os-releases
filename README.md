@@ -17,7 +17,7 @@ Every release ships a `SHA256SUMS` manifest:
 
 ```
 sha256sum -c SHA256SUMS        # Linux / macOS
-Get-FileHash -Algorithm SHA256 .\WaffleOS-Setup-x64-v0.1.4.exe   # PowerShell
+Get-FileHash -Algorithm SHA256 .\WaffleOS-Setup-x64-v<version>.exe   # PowerShell — replace <version> with the release you downloaded (e.g. v0.1.4)
 ```
 
 ## Notes
