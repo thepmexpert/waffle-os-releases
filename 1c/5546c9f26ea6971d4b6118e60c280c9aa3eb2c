@@ -1,0 +1,19 @@
+README.md
+  s_b292f0150ede04::t_3f878b55104aee 20
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "1c5546c9f26ea6971d4b6118e60c280c9aa3eb2c",
+  "prompts": {},
+  "sessions": {
+    "s_b292f0150ede04": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f56972e4dffeJvQl7jIqeJF5f9",
+        "model": "glm-5.3-flash"
+      },
+      "human_author": "David <david4david4david4@gmail.com>"
+    }
+  }
+}
