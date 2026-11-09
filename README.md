@@ -54,4 +54,5 @@ Get-FileHash -Algorithm SHA256 .\WaffleOS-Setup-x64-v0.1.9.exe   # PowerShell
 ## Notes
 
 - Assets are attached to releases by CI from the private build repo on every `v*` tag.
+- The resident tray app is currently **Windows-only**; macOS/Linux installs run the `waffle` CLI/daemon without a tray icon.
 - Questions or issues? Contact the maintainers (issues are disabled on this mirror repo).
