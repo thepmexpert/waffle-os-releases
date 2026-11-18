@@ -55,7 +55,7 @@ The macOS binaries are ad-hoc signed and not notarized yet, so Gatekeeper silent
 
 - run it from Terminal (`./waffle ...`), or
 - `xattr -d com.apple.quarantine ./waffle`, or
-- right-click the binary in Finder → **Open** → **Open** on the warning.
+- double-click the binary once so Gatekeeper blocks the launch, then open **System Settings → Privacy & Security**, scroll to the **Security** section, click **Open Anyway**, and confirm with **Open**. (The Finder right-click → **Open** override was removed in macOS Sequoia.)
 
 ## Verify checksums
 
