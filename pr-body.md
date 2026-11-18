@@ -1,0 +1,3 @@
+Adds the missing public macOS/Linux install path to the download channel, mirroring the docs change in thepmexpert/waffle-os#178.
+
+Until now this README documented Windows only, and the private repo's guide was unreachable unauthenticated — so non-Windows users had no documented install path at all (thepmexpert/waffle-os#173). The new section follows the flow verified natively in the v0.1.9 install-matrix: download asset + SHA256SUMS, grep-verify, extract, `--root` vault bootstrap, daemon serve + healthz check. Includes the macOS Gatekeeper note (ad-hoc signature, three first-launch workarounds) mirroring the Windows SmartScreen note (thepmexpert/waffle-os#175).

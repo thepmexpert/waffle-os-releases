@@ -14,6 +14,8 @@ name: install-verify
 #     silent install is deterministic. This workflow then simulates the
 #     wizard's one required write (WAFFLE_DAEMON_TOKEN into the seeded
 #     per-user vault) and verifies serve + healthz.
+#   - The installer invocation sets MSYS_NO_PATHCONV=1 so Git Bash passes
+#     the slash-prefixed Inno Setup switches through untouched.
 #   - When waffle-os lands first-run PR2/PR3 (tray SETUP_REQUIRED state +
 #     `waffle doctor`), add `waffle doctor --root <vault>` as the final
 #     check here; it replaces the manual checklist below.
@@ -41,8 +43,8 @@ jobs:
   verify:
     name: install-verify (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
-    fail-fast: false
     strategy:
+      fail-fast: false
       matrix:
         include:
           - { os: windows-latest, name: windows }
@@ -52,15 +54,25 @@ jobs:
       run:
         shell: bash
     steps:
+      # Caller-controlled values (dispatch input / release tag name) reach
+      # the script through env, never through template interpolation — a
+      # tag is DATA, not code (zizmor template-injection).
       - name: Resolve tag
         id: tag
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG_EXPR: ${{ inputs.tag || github.event.release.tag_name }}
         run: |
-          TAG="${{ inputs.tag || github.event.release.tag_name }}"
+          TAG="${TAG_EXPR}"
           if [ -z "$TAG" ]; then
             TAG="$(gh release view -R "$REPO" --json tagName --jq .tagName)"
           fi
+          case "$TAG" in
+            *[!A-Za-z0-9._-]*)
+              echo "Refusing to use suspicious tag value: $TAG" >&2
+              exit 1
+              ;;
+          esac
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Verifying release $TAG (install round #$GITHUB_RUN_NUMBER)"
 
@@ -80,28 +92,47 @@ jobs:
           else
             ASSET="waffle-linux-amd64"
           fi
+          S="## install-verify ($RUNNER_OS) — $TAG"
+          # Summary and logs exist BEFORE any check that can fail, so an
+          # early failure still reports and uploads artifacts.
+          echo "$S" > "$GITHUB_STEP_SUMMARY"
           mkdir -p dl && cd dl
-          gh release download "$TAG" -R "$REPO" -p "$ASSET" -p SHA256SUMS
-          grep "$ASSET" SHA256SUMS | sha256sum -c -
-          S="## install-verify ($RUNNER_OS) — $TAG" ; echo "$S" > "$GITHUB_STEP_SUMMARY"
 
           rc=0
+          gh release download "$TAG" -R "$REPO" -p "$ASSET" -p SHA256SUMS \
+            > download.log 2>&1 || rc=$?
+          echo "- release download: $([ $rc -eq 0 ] && echo PASS || echo FAIL) (exit $rc)" >> "$GITHUB_STEP_SUMMARY"
+          if [ $rc -ne 0 ]; then cat download.log; exit 1; fi
+
+          # macOS ships shasum (BSD), not GNU sha256sum
+          rc=0
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            grep "$ASSET" SHA256SUMS | shasum -a 256 -c - > checksum.log 2>&1 || rc=$?
+          else
+            grep "$ASSET" SHA256SUMS | sha256sum -c - > checksum.log 2>&1 || rc=$?
+          fi
+          echo "- SHA256 checksum: $([ $rc -eq 0 ] && echo PASS || echo FAIL) (exit $rc)" >> "$GITHUB_STEP_SUMMARY"
+          if [ $rc -ne 0 ]; then cat checksum.log; exit 1; fi
+
           if [ "$RUNNER_OS" = "macOS" ]; then
             tar xzf "$ASSET" && BIN="./waffle" && chmod +x "$BIN"
           else
             BIN="./waffle-linux-amd64" && chmod +x "$BIN"
           fi
 
+          rc=0
           "$BIN" validate > validate.out 2>&1 || rc=$?
           echo "- bundled-vault validate: exit $rc $([ $rc -eq 0 ] && echo PASS || echo FAIL)" >> "$GITHUB_STEP_SUMMARY"
           if [ $rc -ne 0 ]; then cat validate.out; exit 1; fi
 
+          rc=0
           "$BIN" --root ci-vault init-root > init-root.out 2>&1 || rc=$?
           if [ -d ci-vault/skills ] && [ $rc -eq 0 ]; then
             echo "- init-root seeded vault: PASS" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "- init-root seeded vault: FAIL (exit $rc)" >> "$GITHUB_STEP_SUMMARY"
-            cat init-root.out; exit 1
+            cat init-root.out
+            exit 1
           fi
 
           printf 'WAFFLE_DAEMON_TOKEN=%s\n' "$(openssl rand -hex 24)" > ci-vault/.env.local
@@ -110,27 +141,41 @@ jobs:
           "$BIN" --root ci-vault serve --port "$PORT" > serve.log 2>&1 &
           SERVE_PID=$!
           ok=""
-          for i in $(seq 1 30); do
-            if curl -sf "http://127.0.0.1:$PORT/healthz" > /dev/null; then ok=1; break; fi
+          deadline=$((SECONDS + 30))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            if curl -sf --max-time "$((deadline - SECONDS))" \
+                "http://127.0.0.1:$PORT/healthz" > /dev/null; then
+              ok=1
+              break
+            fi
             sleep 1
           done
           if [ -n "$ok" ]; then
-            echo "- daemon /healthz: PASS (ready within ${i}s)" >> "$GITHUB_STEP_SUMMARY"
+            echo "- daemon /healthz: PASS (ready within $((SECONDS - deadline + 30))s)" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "- daemon /healthz: FAIL (unreachable after 30s — serve log below)" >> "$GITHUB_STEP_SUMMARY"
+            echo "- daemon /healthz: FAIL (unreachable after 30s wall clock — serve log below)" >> "$GITHUB_STEP_SUMMARY"
             cat serve.log
-            kill $SERVE_PID 2>/dev/null
+            kill $SERVE_PID 2>/dev/null || true
             exit 1
           fi
 
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          "$BIN" --root ci-vault status >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
+          src=0
+          "$BIN" --root ci-vault status > status.out 2>&1 || src=$?
+          cat status.out >> "$GITHUB_STEP_SUMMARY" || true
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          kill $SERVE_PID 2>/dev/null
+          echo "- waffle status: exit $src $([ $src -eq 0 ] && echo PASS || echo FAIL)" >> "$GITHUB_STEP_SUMMARY"
+
+          kill $SERVE_PID 2>/dev/null || true
+
+          if [ "$src" -ne 0 ]; then
+            echo "- result: FAIL" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
           echo "- result: PASS" >> "$GITHUB_STEP_SUMMARY"
 
       # ------------------------------------------------------------------
-      # Windows: the customer path (signed-checksum Setup exe, silent,
+      # Windows: the customer path (checksum-verified Setup exe, silent,
       # elevated). Silent mode skips wizard + tray autostart (skipifsilent),
       # so we simulate the wizard's token write, then verify tray smoke,
       # seeded vault, serve, and healthz.
@@ -142,13 +187,31 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
           set -uo pipefail
-          mkdir -p dl && cd dl
           ASSET="WaffleOS-Setup-x64-$TAG.exe"
-          gh release download "$TAG" -R "$REPO" -p "$ASSET" -p SHA256SUMS
-          grep "$ASSET" SHA256SUMS | sha256sum -c -
-          S="## install-verify (Windows) — $TAG" ; echo "$S" > "$GITHUB_STEP_SUMMARY"
+          S="## install-verify (Windows) — $TAG"
+          echo "$S" > "$GITHUB_STEP_SUMMARY"
+          mkdir -p dl && cd dl
 
-          ./"$ASSET" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-
+          rc=0
+          gh release download "$TAG" -R "$REPO" -p "$ASSET" -p SHA256SUMS \
+            > download.log 2>&1 || rc=$?
+          echo "- release download: $([ $rc -eq 0 ] && echo PASS || echo FAIL) (exit $rc)" >> "$GITHUB_STEP_SUMMARY"
+          if [ $rc -ne 0 ]; then cat download.log; exit 1; fi
+
+          rc=0
+          grep "$ASSET" SHA256SUMS | sha256sum -c - > checksum.log 2>&1 || rc=$?
+          echo "- SHA256 checksum: $([ $rc -eq 0 ] && echo PASS || echo FAIL) (exit $rc)" >> "$GITHUB_STEP_SUMMARY"
+          if [ $rc -ne 0 ]; then cat checksum.log; exit 1; fi
+
+          # MSYS_NO_PATHCONV keeps Git Bash from rewriting the
+          # slash-prefixed Inno Setup switches into Windows paths.
+          rc=0
+          MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
+            ./"$ASSET" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- \
+            > installer.log 2>&1 || rc=$?
+          echo "- silent install: $([ $rc -eq 0 ] && echo PASS || echo FAIL) (exit $rc)" >> "$GITHUB_STEP_SUMMARY"
+          if [ $rc -ne 0 ]; then cat installer.log; exit 1; fi
+
           APP="/c/Program Files/WaffleOS/bin"
           if [ ! -d "$APP" ]; then
             echo "- install dir $APP missing: FAIL" >> "$GITHUB_STEP_SUMMARY"
@@ -156,14 +219,15 @@ jobs:
           fi
           ls "$APP"
 
-          rc=0
-          "$APP/waffle.exe" validate > validate.out 2>&1 || rc=$?
-          echo "- bundled-vault validate: exit $rc $([ $rc -eq 0 ] && echo PASS || echo FAIL)" >> "$GITHUB_STEP_SUMMARY"
-          if [ $rc -ne 0 ]; then cat validate.out; fi
+          validate_rc=0
+          "$APP/waffle.exe" validate > validate.out 2>&1 || validate_rc=$?
+          echo "- bundled-vault validate: exit $validate_rc $([ $validate_rc -eq 0 ] && echo PASS || echo FAIL)" >> "$GITHUB_STEP_SUMMARY"
+          if [ $validate_rc -ne 0 ]; then cat validate.out; fi
 
-          "$APP/waffle-tray.exe" --check > tray-check.out 2>&1 || rc=$?
+          tray_rc=0
+          "$APP/waffle-tray.exe" --check > tray-check.out 2>&1 || tray_rc=$?
           # windowed binary: the pass signal is the exit code, never stdout
-          echo "- tray --check smoke: exit $rc $([ $rc -eq 0 ] && echo PASS || echo FAIL)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- tray --check smoke: exit $tray_rc $([ $tray_rc -eq 0 ] && echo PASS || echo FAIL)" >> "$GITHUB_STEP_SUMMARY"
 
           VAULT="$(cygpath -u "$LOCALAPPDATA")/WaffleOS/vault"
           if [ -d "$VAULT/skills" ]; then
@@ -178,24 +242,39 @@ jobs:
           "$APP/waffle.exe" --root "$(cygpath -w "$VAULT")" serve --port "$PORT" > serve.log 2>&1 &
           SERVE_PID=$!
           ok=""
-          for i in $(seq 1 30); do
-            if curl -sf "http://127.0.0.1:$PORT/healthz" > /dev/null; then ok=1; break; fi
+          deadline=$((SECONDS + 30))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            if curl -sf --max-time "$((deadline - SECONDS))" \
+                "http://127.0.0.1:$PORT/healthz" > /dev/null; then
+              ok=1
+              break
+            fi
             sleep 1
           done
           if [ -n "$ok" ]; then
-            echo "- daemon /healthz: PASS (ready within ${i}s)" >> "$GITHUB_STEP_SUMMARY"
+            echo "- daemon /healthz: PASS (ready within $((SECONDS - deadline + 30))s)" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "- daemon /healthz: FAIL (unreachable after 30s — serve log below)" >> "$GITHUB_STEP_SUMMARY"
+            echo "- daemon /healthz: FAIL (unreachable after 30s wall clock — serve log below)" >> "$GITHUB_STEP_SUMMARY"
             cat serve.log
-            taskkill //F //IM waffle.exe 2>/dev/null
+            taskkill //F //IM waffle.exe 2>/dev/null || true
             exit 1
           fi
 
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          "$APP/waffle.exe" --root "$(cygpath -w "$VAULT")" status >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
+          status_rc=0
+          "$APP/waffle.exe" --root "$(cygpath -w "$VAULT")" status > status.out 2>&1 || status_rc=$?
+          cat status.out >> "$GITHUB_STEP_SUMMARY" || true
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          kill $SERVE_PID 2>/dev/null
-          taskkill //F //IM waffle.exe 2>/dev/null
+          echo "- waffle status: exit $status_rc $([ $status_rc -eq 0 ] && echo PASS || echo FAIL)" >> "$GITHUB_STEP_SUMMARY"
+
+          # cleanup is never the verdict
+          kill $SERVE_PID 2>/dev/null || true
+          taskkill //F //IM waffle.exe 2>/dev/null || true
+
+          if [ "$validate_rc" -ne 0 ] || [ "$tray_rc" -ne 0 ] || [ "$status_rc" -ne 0 ]; then
+            echo "- result: FAIL" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
           echo "- result: PASS" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload logs
@@ -204,8 +283,6 @@ jobs:
         with:
           name: install-logs-${{ matrix.name }}
           path: |
-            dl/validate.out
-            dl/init-root.out
-            dl/tray-check.out
-            dl/serve.log
+            dl/*.log
+            dl/*.out
           if-no-files-found: ignore
