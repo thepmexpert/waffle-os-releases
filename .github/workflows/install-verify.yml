@@ -270,8 +270,8 @@ jobs:
           # The Setup exe does not run the wizard in silent mode, so without
           # this block the CLI install path is never exercised on Windows.
           irc=0
-          "$APP/waffle.exe" install --non-interactive --goal standalone \
-            --root "$(cygpath -w "$PWD/ci-install-vault")" > install.out 2>&1 || irc=$?
+          "$APP/waffle.exe" --root "$(cygpath -w "$PWD/ci-install-vault")" install --non-interactive --goal standalone \
+            > install.out 2>&1 || irc=$?
           echo "- install (non-interactive, fresh root): $([ $irc -eq 0 ] && echo PASS || echo FAIL) (exit $irc)" >> "$GITHUB_STEP_SUMMARY"
           if [ $irc -ne 0 ]; then cat install.out; exit 1; fi
 
