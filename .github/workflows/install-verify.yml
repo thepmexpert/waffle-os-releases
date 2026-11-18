@@ -8,6 +8,14 @@ name: install-verify
 # release assets a customer downloads, so this tests the shipped
 # experience, not a dev checkout.
 #
+# F17 lesson (issue #189, 2026-11-18): v0.1.10 and v0.1.11 both passed this
+# rig while `waffle install` — the path real CLI users run — shipped an
+# EMPTY vault (exit 0, no agents/skills/rules), because no leg ever ran the
+# install wizard and `validate` exits 0 even on an all-zero vault. Every
+# leg now runs a fresh-root non-interactive install and asserts non-zero
+# agents/skills/rules counts from validate output. Do not weaken this:
+# exit codes alone are how the empty-vault install shipped green twice.
+#
 # Windows notes (from setup.iss in thepmexpert/waffle-os):
 #   - PrivilegesRequired=admin; DefaultDirName={autopf}\WaffleOS
 #   - The wizard and tray autostart [Run] entries are `skipifsilent`, so a
@@ -125,6 +133,30 @@ jobs:
             BIN="./waffle-linux-amd64" && chmod +x "$BIN"
           fi
 
+          # ---- install wizard path (issue #189 regression guard) ----
+          # Real CLI users run `waffle install`, not init-root. The wizard
+          # must materialize agents/skills/rules on a fresh root, and the
+          # counts must be non-zero (validate exits 0 even when hollow).
+          rc=0
+          "$BIN" --root ci-install-vault install --non-interactive --goal standalone \
+            > install.out 2>&1 || rc=$?
+          echo "- install (non-interactive, fresh root): $([ $rc -eq 0 ] && echo PASS || echo FAIL) (exit $rc)" >> "$GITHUB_STEP_SUMMARY"
+          if [ $rc -ne 0 ]; then cat install.out; exit 1; fi
+
+          icrc=0
+          "$BIN" --root ci-install-vault validate > install-validate.out 2>&1 || true
+          agents=$(grep -o '"agents": [0-9]*' install-validate.out | grep -o '[0-9]*$' | head -1)
+          skills=$(grep -o '"skills": [0-9]*' install-validate.out | grep -o '[0-9]*$' | head -1)
+          rules=$(grep -o '"rules": [0-9]*' install-validate.out | grep -o '[0-9]*$' | head -1)
+          if [ "${agents:-0}" -gt 0 ] && [ "${skills:-0}" -gt 0 ] && [ "${rules:-0}" -gt 0 ]; then
+            echo "- installed-vault counts (agents=$agents skills=$skills rules=$rules): PASS" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- installed-vault counts: FAIL (agents=${agents:-0} skills=${skills:-0} rules=${rules:-0} — issue #189 regression)" >> "$GITHUB_STEP_SUMMARY"
+            cat install-validate.out
+            ls ci-install-vault 2>/dev/null
+            icrc=1
+          fi
+
           rc=0
           "$BIN" validate > validate.out 2>&1 || rc=$?
           echo "- bundled-vault validate: exit $rc $([ $rc -eq 0 ] && echo PASS || echo FAIL)" >> "$GITHUB_STEP_SUMMARY"
@@ -173,7 +205,7 @@ jobs:
 
           kill $SERVE_PID 2>/dev/null || true
 
-          if [ "$src" -ne 0 ]; then
+          if [ "$src" -ne 0 ] || [ "$icrc" -ne 0 ]; then
             echo "- result: FAIL" >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
@@ -233,6 +265,30 @@ jobs:
           "$APP/waffle-tray.exe" --check > tray-check.out 2>&1 || tray_rc=$?
           # windowed binary: the pass signal is the exit code, never stdout
           echo "- tray --check smoke: exit $tray_rc $([ $tray_rc -eq 0 ] && echo PASS || echo FAIL)" >> "$GITHUB_STEP_SUMMARY"
+
+          # ---- install wizard path (issue #189 regression guard) ----
+          # The Setup exe does not run the wizard in silent mode, so without
+          # this block the CLI install path is never exercised on Windows.
+          irc=0
+          "$APP/waffle.exe" install --non-interactive --goal standalone \
+            --root "$(cygpath -w "$PWD/ci-install-vault")" > install.out 2>&1 || irc=$?
+          echo "- install (non-interactive, fresh root): $([ $irc -eq 0 ] && echo PASS || echo FAIL) (exit $irc)" >> "$GITHUB_STEP_SUMMARY"
+          if [ $irc -ne 0 ]; then cat install.out; exit 1; fi
+
+          icrc=0
+          "$APP/waffle.exe" --root "$(cygpath -w "$PWD/ci-install-vault")" validate \
+            > install-validate.out 2>&1 || true
+          agents=$(grep -o '"agents": [0-9]*' install-validate.out | grep -o '[0-9]*$' | head -1)
+          skills=$(grep -o '"skills": [0-9]*' install-validate.out | grep -o '[0-9]*$' | head -1)
+          rules=$(grep -o '"rules": [0-9]*' install-validate.out | grep -o '[0-9]*$' | head -1)
+          if [ "${agents:-0}" -gt 0 ] && [ "${skills:-0}" -gt 0 ] && [ "${rules:-0}" -gt 0 ]; then
+            echo "- installed-vault counts (agents=$agents skills=$skills rules=$rules): PASS" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- installed-vault counts: FAIL (agents=${agents:-0} skills=${skills:-0} rules=${rules:-0} — issue #189 regression)" >> "$GITHUB_STEP_SUMMARY"
+            cat install-validate.out
+            ls ci-install-vault 2>/dev/null
+            icrc=1
+          fi
 
           # The silent installer DELIBERATELY does not seed the per-user
           # vault: setup.iss seeds a Startup launcher (--seed-first-run),
@@ -302,7 +358,7 @@ jobs:
           kill $SERVE_PID 2>/dev/null || true
           taskkill //F //IM waffle.exe 2>/dev/null || true
 
-          if [ "$validate_rc" -ne 0 ] || [ "$tray_rc" -ne 0 ] || [ "$status_rc" -ne 0 ]; then
+          if [ "$validate_rc" -ne 0 ] || [ "$tray_rc" -ne 0 ] || [ "$status_rc" -ne 0 ] || [ "$icrc" -ne 0 ]; then
             echo "- result: FAIL" >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
