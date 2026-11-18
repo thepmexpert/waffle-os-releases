@@ -17,14 +17,23 @@ No Python, no command line, no PATH edits required.
    - Apple Silicon Mac: `waffle-macos-arm64.tar.gz`
    - Intel Mac: `waffle-macos-amd64.tar.gz`
    - Linux x86-64: `waffle-linux-amd64`
-2. Verify the checksum (the line must end in `OK`):
+2. Verify the checksum (the line must end in `OK`), from the folder where you downloaded the assets:
    ```bash
-   grep waffle-macos-arm64 SHA256SUMS | shasum -a 256 -c -   # macOS
-   grep waffle-linux-amd64  SHA256SUMS | sha256sum -c -      # Linux
+   # Apple Silicon Mac
+   grep waffle-macos-arm64.tar.gz SHA256SUMS | shasum -a 256 -c -
+   # Intel Mac
+   grep waffle-macos-amd64.tar.gz SHA256SUMS | shasum -a 256 -c -
+   # Linux x86-64
+   grep waffle-linux-amd64 SHA256SUMS | sha256sum -c -
    ```
-3. Extract and run:
+3. Extract and run (Linux: verify the checksum first, then rename — `sha256sum -c` expects the original asset name):
    ```bash
+   # Apple Silicon Mac
    tar -xzf waffle-macos-arm64.tar.gz && ./waffle --help
+   # Intel Mac
+   tar -xzf waffle-macos-amd64.tar.gz && ./waffle --help
+   # Linux x86-64 — raw binary, not an archive
+   mv waffle-linux-amd64 waffle && chmod +x waffle && ./waffle --help
    ```
 4. Create a vault and start the daemon (always pass an explicit `--root` — the binary refuses to run against the vault bundled inside it):
    ```bash
