@@ -1,0 +1,211 @@
+name: install-verify
+
+# Round-N install verification: runs the REAL customer install path for a
+# published release on all three OSes and reports pass/fail per check.
+#
+# Why this lives here: public repo -> standard GitHub-hosted runners are
+# free, including Windows and macOS. The jobs download the exact public
+# release assets a customer downloads, so this tests the shipped
+# experience, not a dev checkout.
+#
+# Windows notes (from setup.iss in thepmexpert/waffle-os):
+#   - PrivilegesRequired=admin; DefaultDirName={autopf}\WaffleOS
+#   - The wizard and tray autostart [Run] entries are `skipifsilent`, so a
+#     silent install is deterministic. This workflow then simulates the
+#     wizard's one required write (WAFFLE_DAEMON_TOKEN into the seeded
+#     per-user vault) and verifies serve + healthz.
+#   - When waffle-os lands first-run PR2/PR3 (tray SETUP_REQUIRED state +
+#     `waffle doctor`), add `waffle doctor --root <vault>` as the final
+#     check here; it replaces the manual checklist below.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to verify (blank = latest published)"
+        required: false
+        default: ""
+  release:
+    types: [published]
+  schedule:
+    - cron: "0 6 * * 1" # weekly, Mondays 06:00 UTC
+
+permissions:
+  contents: read
+
+env:
+  REPO: thepmexpert/waffle-os-releases
+  PORT: "18787"
+
+jobs:
+  verify:
+    name: install-verify (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    fail-fast: false
+    strategy:
+      matrix:
+        include:
+          - { os: windows-latest, name: windows }
+          - { os: ubuntu-latest, name: linux }
+          - { os: macos-latest, name: macos }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Resolve tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ inputs.tag || github.event.release.tag_name }}"
+          if [ -z "$TAG" ]; then
+            TAG="$(gh release view -R "$REPO" --json tagName --jq .tagName)"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Verifying release $TAG (install round #$GITHUB_RUN_NUMBER)"
+
+      # ------------------------------------------------------------------
+      # Linux + macOS: manual install path (download -> validate bundled
+      # vault -> init-root -> token -> serve -> healthz -> status)
+      # ------------------------------------------------------------------
+      - name: Verify (linux + macos)
+        if: runner.os != 'Windows'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -uo pipefail
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            ASSET="waffle-macos-arm64.tar.gz"
+          else
+            ASSET="waffle-linux-amd64"
+          fi
+          mkdir -p dl && cd dl
+          gh release download "$TAG" -R "$REPO" -p "$ASSET" -p SHA256SUMS
+          grep "$ASSET" SHA256SUMS | sha256sum -c -
+          S="## install-verify ($RUNNER_OS) — $TAG" ; echo "$S" > "$GITHUB_STEP_SUMMARY"
+
+          rc=0
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            tar xzf "$ASSET" && BIN="./waffle" && chmod +x "$BIN"
+          else
+            BIN="./waffle-linux-amd64" && chmod +x "$BIN"
+          fi
+
+          "$BIN" validate > validate.out 2>&1 || rc=$?
+          echo "- bundled-vault validate: exit $rc $([ $rc -eq 0 ] && echo PASS || echo FAIL)" >> "$GITHUB_STEP_SUMMARY"
+          if [ $rc -ne 0 ]; then cat validate.out; exit 1; fi
+
+          "$BIN" --root ci-vault init-root > init-root.out 2>&1 || rc=$?
+          if [ -d ci-vault/skills ] && [ $rc -eq 0 ]; then
+            echo "- init-root seeded vault: PASS" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- init-root seeded vault: FAIL (exit $rc)" >> "$GITHUB_STEP_SUMMARY"
+            cat init-root.out; exit 1
+          fi
+
+          printf 'WAFFLE_DAEMON_TOKEN=%s\n' "$(openssl rand -hex 24)" > ci-vault/.env.local
+          chmod 600 ci-vault/.env.local
+
+          "$BIN" --root ci-vault serve --port "$PORT" > serve.log 2>&1 &
+          SERVE_PID=$!
+          ok=""
+          for i in $(seq 1 30); do
+            if curl -sf "http://127.0.0.1:$PORT/healthz" > /dev/null; then ok=1; break; fi
+            sleep 1
+          done
+          if [ -n "$ok" ]; then
+            echo "- daemon /healthz: PASS (ready within ${i}s)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- daemon /healthz: FAIL (unreachable after 30s — serve log below)" >> "$GITHUB_STEP_SUMMARY"
+            cat serve.log
+            kill $SERVE_PID 2>/dev/null
+            exit 1
+          fi
+
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          "$BIN" --root ci-vault status >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          kill $SERVE_PID 2>/dev/null
+          echo "- result: PASS" >> "$GITHUB_STEP_SUMMARY"
+
+      # ------------------------------------------------------------------
+      # Windows: the customer path (signed-checksum Setup exe, silent,
+      # elevated). Silent mode skips wizard + tray autostart (skipifsilent),
+      # so we simulate the wizard's token write, then verify tray smoke,
+      # seeded vault, serve, and healthz.
+      # ------------------------------------------------------------------
+      - name: Verify (windows)
+        if: runner.os == 'Windows'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -uo pipefail
+          mkdir -p dl && cd dl
+          ASSET="WaffleOS-Setup-x64-$TAG.exe"
+          gh release download "$TAG" -R "$REPO" -p "$ASSET" -p SHA256SUMS
+          grep "$ASSET" SHA256SUMS | sha256sum -c -
+          S="## install-verify (Windows) — $TAG" ; echo "$S" > "$GITHUB_STEP_SUMMARY"
+
+          ./"$ASSET" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-
+          APP="/c/Program Files/WaffleOS/bin"
+          if [ ! -d "$APP" ]; then
+            echo "- install dir $APP missing: FAIL" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          ls "$APP"
+
+          rc=0
+          "$APP/waffle.exe" validate > validate.out 2>&1 || rc=$?
+          echo "- bundled-vault validate: exit $rc $([ $rc -eq 0 ] && echo PASS || echo FAIL)" >> "$GITHUB_STEP_SUMMARY"
+          if [ $rc -ne 0 ]; then cat validate.out; fi
+
+          "$APP/waffle-tray.exe" --check > tray-check.out 2>&1 || rc=$?
+          # windowed binary: the pass signal is the exit code, never stdout
+          echo "- tray --check smoke: exit $rc $([ $rc -eq 0 ] && echo PASS || echo FAIL)" >> "$GITHUB_STEP_SUMMARY"
+
+          VAULT="$(cygpath -u "$LOCALAPPDATA")/WaffleOS/vault"
+          if [ -d "$VAULT/skills" ]; then
+            echo "- per-user vault seeded: PASS" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- per-user vault seeded: FAIL ($VAULT missing skills/)" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          printf 'WAFFLE_DAEMON_TOKEN=%s\n' "$(openssl rand -hex 24)" > "$VAULT/.env.local"
+
+          "$APP/waffle.exe" --root "$(cygpath -w "$VAULT")" serve --port "$PORT" > serve.log 2>&1 &
+          SERVE_PID=$!
+          ok=""
+          for i in $(seq 1 30); do
+            if curl -sf "http://127.0.0.1:$PORT/healthz" > /dev/null; then ok=1; break; fi
+            sleep 1
+          done
+          if [ -n "$ok" ]; then
+            echo "- daemon /healthz: PASS (ready within ${i}s)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- daemon /healthz: FAIL (unreachable after 30s — serve log below)" >> "$GITHUB_STEP_SUMMARY"
+            cat serve.log
+            taskkill //F //IM waffle.exe 2>/dev/null
+            exit 1
+          fi
+
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          "$APP/waffle.exe" --root "$(cygpath -w "$VAULT")" status >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          kill $SERVE_PID 2>/dev/null
+          taskkill //F //IM waffle.exe 2>/dev/null
+          echo "- result: PASS" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-logs-${{ matrix.name }}
+          path: |
+            dl/validate.out
+            dl/init-root.out
+            dl/tray-check.out
+            dl/serve.log
+          if-no-files-found: ignore
