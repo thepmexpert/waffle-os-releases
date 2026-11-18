@@ -41,7 +41,7 @@ No Python, no command line, no PATH edits required.
 
 ### macOS Gatekeeper note
 
-The macOS binaries are ad-hoc signed and not notarized yet, so on Apple Silicon Gatekeeper silently blocks a downloaded binary launched from Finder or `open`. After verifying the checksum, use one of these for the first launch — afterwards the binary starts normally:
+The macOS binaries are ad-hoc signed and not notarized yet, so Gatekeeper silently blocks a downloaded binary launched from Finder or `open`. After verifying the checksum, use one of these for the first launch — afterwards the binary starts normally:
 
 - run it from Terminal (`./waffle ...`), or
 - `xattr -d com.apple.quarantine ./waffle`, or
