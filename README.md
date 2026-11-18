@@ -39,6 +39,7 @@ No Python, no command line, no PATH edits required.
    ```bash
    ./waffle --root ~/waffle-vault init-root
    printf 'WAFFLE_DAEMON_TOKEN=%s\n' "$(openssl rand -hex 32)" > ~/waffle-vault/.env.local
+   chmod 600 ~/waffle-vault/.env.local
    ./waffle --root ~/waffle-vault serve   # daemon on 127.0.0.1:8787; runs in the foreground and blocks this terminal
    ```
 
