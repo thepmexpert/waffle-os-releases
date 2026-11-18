@@ -37,7 +37,12 @@ permissions:
 
 env:
   REPO: thepmexpert/waffle-os-releases
-  PORT: "18787"
+  # Must be the config/daemon.yaml DEFAULT (8787): `waffle status` reads the
+  # port from the vault config, and `serve --port X` overrides only the
+  # bind — round 1 failed because serve listened on a custom port while
+  # status knocked on 8787. The rig verifies the default customer path, so
+  # no --port overrides anywhere.
+  PORT: "8787"
 
 jobs:
   verify:
@@ -138,7 +143,7 @@ jobs:
           printf 'WAFFLE_DAEMON_TOKEN=%s\n' "$(openssl rand -hex 24)" > ci-vault/.env.local
           chmod 600 ci-vault/.env.local
 
-          "$BIN" --root ci-vault serve --port "$PORT" > serve.log 2>&1 &
+          "$BIN" --root ci-vault serve > serve.log 2>&1 &
           SERVE_PID=$!
           ok=""
           deadline=$((SECONDS + 30))
@@ -229,17 +234,43 @@ jobs:
           # windowed binary: the pass signal is the exit code, never stdout
           echo "- tray --check smoke: exit $tray_rc $([ $tray_rc -eq 0 ] && echo PASS || echo FAIL)" >> "$GITHUB_STEP_SUMMARY"
 
-          VAULT="$(cygpath -u "$LOCALAPPDATA")/WaffleOS/vault"
-          if [ -d "$VAULT/skills" ]; then
-            echo "- per-user vault seeded: PASS" >> "$GITHUB_STEP_SUMMARY"
+          # The silent installer DELIBERATELY does not seed the per-user
+          # vault: setup.iss seeds a Startup launcher (--seed-first-run),
+          # and the vault itself is seeded per user at first login when the
+          # launcher runs `waffle-tray --first-run` (unelevated). Simulate
+          # that first login: run --first-run in the background (it may end
+          # in the tray GUI loop), wait bounded for its completion marker
+          # (.first-run-complete in the state dir), then kill the tray.
+          "$APP/waffle-tray.exe" --first-run > first-run.log 2>&1 &
+          FR_PID=$!
+          STATE="$(cygpath -u "$LOCALAPPDATA")/WaffleOS"
+          MARKER="$STATE/.first-run-complete"
+          seeded=""
+          deadline=$((SECONDS + 60))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            if [ -f "$MARKER" ] && [ -d "$STATE/vault/skills" ]; then
+              seeded=1
+              break
+            fi
+            sleep 2
+          done
+          # the tray may legitimately still be running as a GUI — stop it
+          taskkill //F //IM waffle-tray.exe 2>/dev/null || true
+          kill $FR_PID 2>/dev/null || true
+          if [ -n "$seeded" ]; then
+            echo "- first login (--first-run seeds vault): PASS" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "- per-user vault seeded: FAIL ($VAULT missing skills/)" >> "$GITHUB_STEP_SUMMARY"
+            echo "- first login (--first-run seeds vault): FAIL (no .first-run-complete + skills/ within 60s — first-run log below)" >> "$GITHUB_STEP_SUMMARY"
+            cat first-run.log
+            ls "$STATE" 2>/dev/null
             exit 1
           fi
 
+          VAULT="$STATE/vault"
+
           printf 'WAFFLE_DAEMON_TOKEN=%s\n' "$(openssl rand -hex 24)" > "$VAULT/.env.local"
 
-          "$APP/waffle.exe" --root "$(cygpath -w "$VAULT")" serve --port "$PORT" > serve.log 2>&1 &
+          "$APP/waffle.exe" --root "$(cygpath -w "$VAULT")" serve > serve.log 2>&1 &
           SERVE_PID=$!
           ok=""
           deadline=$((SECONDS + 30))
