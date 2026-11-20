@@ -189,7 +189,10 @@ jobs:
           ok=""
           deadline=$((SECONDS + 90))
           while [ "$SECONDS" -lt "$deadline" ]; do
-            PORT="$(grep -oE '127\.0\.0\.1:[0-9]+' serve.log 2>/dev/null | head -1 | cut -d: -f2)"
+            # `|| true` is load-bearing: GitHub injects -e into shell: bash
+            # steps, and grep exits 1 while serve.log is still empty (daemon
+            # booting) — an unguarded assignment would kill the step in <1s.
+            PORT="$(grep -oE '127\.0\.0\.1:[0-9]+' serve.log 2>/dev/null | head -1 | cut -d: -f2 || true)"
             if [ -n "$PORT" ] && curl -sf --max-time "$((deadline - SECONDS))" \
                 "http://127.0.0.1:$PORT/healthz" > /dev/null; then
               ok=1
@@ -200,7 +203,7 @@ jobs:
           if [ -n "$ok" ]; then
             echo "- daemon /healthz: PASS (port $PORT, ready within $((SECONDS - deadline + 30))s)" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "- daemon /healthz: FAIL (no healthy daemon within 30s wall clock — serve log below)" >> "$GITHUB_STEP_SUMMARY"
+            echo "- daemon /healthz: FAIL (no healthy daemon within $((deadline - SECONDS + 90))s wall clock — serve log below)" >> "$GITHUB_STEP_SUMMARY"
             cat serve.log
             kill $SERVE_PID 2>/dev/null || true
             exit 1
@@ -346,7 +349,10 @@ jobs:
           ok=""
           deadline=$((SECONDS + 90))
           while [ "$SECONDS" -lt "$deadline" ]; do
-            PORT="$(grep -oE '127\.0\.0\.1:[0-9]+' serve.log 2>/dev/null | head -1 | cut -d: -f2)"
+            # `|| true` is load-bearing: GitHub injects -e into shell: bash
+            # steps — grep exits 1 while serve.log is still empty (daemon
+            # booting) and would kill the step in <1s.
+            PORT="$(grep -oE '127\.0\.0\.1:[0-9]+' serve.log 2>/dev/null | head -1 | cut -d: -f2 || true)"
             if [ -n "$PORT" ] && curl -sf --max-time "$((deadline - SECONDS))" \
                 "http://127.0.0.1:$PORT/healthz" > /dev/null; then
               ok=1
@@ -357,7 +363,7 @@ jobs:
           if [ -n "$ok" ]; then
             echo "- daemon /healthz: PASS (port $PORT, ready within $((SECONDS - deadline + 30))s)" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "- daemon /healthz: FAIL (no healthy daemon within 30s wall clock — serve log below)" >> "$GITHUB_STEP_SUMMARY"
+            echo "- daemon /healthz: FAIL (no healthy daemon within $((deadline - SECONDS + 90))s wall clock — serve log below)" >> "$GITHUB_STEP_SUMMARY"
             cat serve.log
             taskkill //F //IM waffle.exe 2>/dev/null || true
             exit 1
