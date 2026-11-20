@@ -45,12 +45,14 @@ permissions:
 
 env:
   REPO: thepmexpert/waffle-os-releases
-  # Must be the config/daemon.yaml DEFAULT (8787): `waffle status` reads the
-  # port from the vault config, and `serve --port X` overrides only the
-  # bind — round 1 failed because serve listened on a custom port while
-  # status knocked on 8787. The rig verifies the default customer path, so
-  # no --port overrides anywhere.
-  PORT: "8787"
+  # Do NOT assume a default daemon port. serve announces its actual bind in
+  # serve.log ("listening on http://127.0.0.1:PORT") and `waffle status` reads
+  # the port from the vault config — both follow whatever the release uses.
+  # DEFAULT_PORT changed 8787 -> 23166 in waffle-os v0.1.16 (PR #208) and the
+  # hardcoded 8787 failed all three legs on a healthy release. The healthz
+  # check below derives the port from serve.log instead. Still no `--port`
+  # overrides anywhere: serve --port X overrides only the bind while status
+  # knocks on the configured port (round-1 lesson).
 
 jobs:
   verify:
@@ -175,12 +177,24 @@ jobs:
           printf 'WAFFLE_DAEMON_TOKEN=%s\n' "$(openssl rand -hex 24)" > ci-vault/.env.local
           chmod 600 ci-vault/.env.local
 
-          "$BIN" --root ci-vault serve > serve.log 2>&1 &
+          # PYTHONUNBUFFERED: PyInstaller's child Python block-buffers stdout
+          # when redirected; without this a cold-runner boot that misses the
+          # deadline ships an EMPTY serve.log and the failure is undiagnosable
+          # (v0.1.16 re-run 44747918761: 3x 0-byte logs, orphans alive).
+          PYTHONUNBUFFERED=1 "$BIN" --root ci-vault serve > serve.log 2>&1 &
           SERVE_PID=$!
+          # Derive the daemon port from serve.log — never assume a default
+          # (DEFAULT_PORT changed 8787 -> 23166 in v0.1.16). 90s covers cold
+          # PyInstaller extraction + boot on 2-core hosted runners.
           ok=""
-          deadline=$((SECONDS + 30))
+          start=$SECONDS
+          deadline=$((SECONDS + 90))
           while [ "$SECONDS" -lt "$deadline" ]; do
-            if curl -sf --max-time "$((deadline - SECONDS))" \
+            # `|| true` is load-bearing: GitHub injects -e into shell: bash
+            # steps, and grep exits 1 while serve.log is still empty (daemon
+            # booting) — an unguarded assignment would kill the step in <1s.
+            PORT="$(grep -oE '127\.0\.0\.1:[0-9]+' serve.log 2>/dev/null | head -1 | cut -d: -f2 || true)"
+            if [ -n "$PORT" ] && curl -sf --max-time "$((deadline - SECONDS))" \
                 "http://127.0.0.1:$PORT/healthz" > /dev/null; then
               ok=1
               break
@@ -188,9 +202,9 @@ jobs:
             sleep 1
           done
           if [ -n "$ok" ]; then
-            echo "- daemon /healthz: PASS (ready within $((SECONDS - deadline + 30))s)" >> "$GITHUB_STEP_SUMMARY"
+            echo "- daemon /healthz: PASS (port $PORT, ready within $((SECONDS - start))s)" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "- daemon /healthz: FAIL (unreachable after 30s wall clock — serve log below)" >> "$GITHUB_STEP_SUMMARY"
+            echo "- daemon /healthz: FAIL (no healthy daemon within $((deadline - start))s wall clock — serve log below)" >> "$GITHUB_STEP_SUMMARY"
             cat serve.log
             kill $SERVE_PID 2>/dev/null || true
             exit 1
@@ -326,12 +340,22 @@ jobs:
 
           printf 'WAFFLE_DAEMON_TOKEN=%s\n' "$(openssl rand -hex 24)" > "$VAULT/.env.local"
 
-          "$APP/waffle.exe" --root "$(cygpath -w "$VAULT")" serve > serve.log 2>&1 &
+          # PYTHONUNBUFFERED: see the linux+macos leg — keeps serve.log
+          # populated when a cold runner misses the deadline.
+          PYTHONUNBUFFERED=1 "$APP/waffle.exe" --root "$(cygpath -w "$VAULT")" serve > serve.log 2>&1 &
           SERVE_PID=$!
+          # Derive the daemon port from serve.log — never assume a default
+          # (DEFAULT_PORT changed 8787 -> 23166 in v0.1.16). 90s covers cold
+          # PyInstaller extraction + boot on 2-core hosted runners.
           ok=""
-          deadline=$((SECONDS + 30))
+          start=$SECONDS
+          deadline=$((SECONDS + 90))
           while [ "$SECONDS" -lt "$deadline" ]; do
-            if curl -sf --max-time "$((deadline - SECONDS))" \
+            # `|| true` is load-bearing: GitHub injects -e into shell: bash
+            # steps — grep exits 1 while serve.log is still empty (daemon
+            # booting) and would kill the step in <1s.
+            PORT="$(grep -oE '127\.0\.0\.1:[0-9]+' serve.log 2>/dev/null | head -1 | cut -d: -f2 || true)"
+            if [ -n "$PORT" ] && curl -sf --max-time "$((deadline - SECONDS))" \
                 "http://127.0.0.1:$PORT/healthz" > /dev/null; then
               ok=1
               break
@@ -339,9 +363,9 @@ jobs:
             sleep 1
           done
           if [ -n "$ok" ]; then
-            echo "- daemon /healthz: PASS (ready within $((SECONDS - deadline + 30))s)" >> "$GITHUB_STEP_SUMMARY"
+            echo "- daemon /healthz: PASS (port $PORT, ready within $((SECONDS - start))s)" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "- daemon /healthz: FAIL (unreachable after 30s wall clock — serve log below)" >> "$GITHUB_STEP_SUMMARY"
+            echo "- daemon /healthz: FAIL (no healthy daemon within $((deadline - start))s wall clock — serve log below)" >> "$GITHUB_STEP_SUMMARY"
             cat serve.log
             taskkill //F //IM waffle.exe 2>/dev/null || true
             exit 1
