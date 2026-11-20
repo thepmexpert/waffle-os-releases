@@ -177,12 +177,17 @@ jobs:
           printf 'WAFFLE_DAEMON_TOKEN=%s\n' "$(openssl rand -hex 24)" > ci-vault/.env.local
           chmod 600 ci-vault/.env.local
 
-          "$BIN" --root ci-vault serve > serve.log 2>&1 &
+          # PYTHONUNBUFFERED: PyInstaller's child Python block-buffers stdout
+          # when redirected; without this a cold-runner boot that misses the
+          # deadline ships an EMPTY serve.log and the failure is undiagnosable
+          # (v0.1.16 re-run 44747918761: 3x 0-byte logs, orphans alive).
+          PYTHONUNBUFFERED=1 "$BIN" --root ci-vault serve > serve.log 2>&1 &
           SERVE_PID=$!
           # Derive the daemon port from serve.log — never assume a default
-          # (DEFAULT_PORT changed 8787 -> 23166 in v0.1.16).
+          # (DEFAULT_PORT changed 8787 -> 23166 in v0.1.16). 90s covers cold
+          # PyInstaller extraction + boot on 2-core hosted runners.
           ok=""
-          deadline=$((SECONDS + 30))
+          deadline=$((SECONDS + 90))
           while [ "$SECONDS" -lt "$deadline" ]; do
             PORT="$(grep -oE '127\.0\.0\.1:[0-9]+' serve.log 2>/dev/null | head -1 | cut -d: -f2)"
             if [ -n "$PORT" ] && curl -sf --max-time "$((deadline - SECONDS))" \
@@ -331,12 +336,15 @@ jobs:
 
           printf 'WAFFLE_DAEMON_TOKEN=%s\n' "$(openssl rand -hex 24)" > "$VAULT/.env.local"
 
-          "$APP/waffle.exe" --root "$(cygpath -w "$VAULT")" serve > serve.log 2>&1 &
+          # PYTHONUNBUFFERED: see the linux+macos leg — keeps serve.log
+          # populated when a cold runner misses the deadline.
+          PYTHONUNBUFFERED=1 "$APP/waffle.exe" --root "$(cygpath -w "$VAULT")" serve > serve.log 2>&1 &
           SERVE_PID=$!
           # Derive the daemon port from serve.log — never assume a default
-          # (DEFAULT_PORT changed 8787 -> 23166 in v0.1.16).
+          # (DEFAULT_PORT changed 8787 -> 23166 in v0.1.16). 90s covers cold
+          # PyInstaller extraction + boot on 2-core hosted runners.
           ok=""
-          deadline=$((SECONDS + 30))
+          deadline=$((SECONDS + 90))
           while [ "$SECONDS" -lt "$deadline" ]; do
             PORT="$(grep -oE '127\.0\.0\.1:[0-9]+' serve.log 2>/dev/null | head -1 | cut -d: -f2)"
             if [ -n "$PORT" ] && curl -sf --max-time "$((deadline - SECONDS))" \
