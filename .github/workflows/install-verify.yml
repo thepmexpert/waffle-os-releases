@@ -187,6 +187,7 @@ jobs:
           # (DEFAULT_PORT changed 8787 -> 23166 in v0.1.16). 90s covers cold
           # PyInstaller extraction + boot on 2-core hosted runners.
           ok=""
+          start=$SECONDS
           deadline=$((SECONDS + 90))
           while [ "$SECONDS" -lt "$deadline" ]; do
             # `|| true` is load-bearing: GitHub injects -e into shell: bash
@@ -201,9 +202,9 @@ jobs:
             sleep 1
           done
           if [ -n "$ok" ]; then
-            echo "- daemon /healthz: PASS (port $PORT, ready within $((SECONDS - deadline + 30))s)" >> "$GITHUB_STEP_SUMMARY"
+            echo "- daemon /healthz: PASS (port $PORT, ready within $((SECONDS - start))s)" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "- daemon /healthz: FAIL (no healthy daemon within $((deadline - SECONDS + 90))s wall clock — serve log below)" >> "$GITHUB_STEP_SUMMARY"
+            echo "- daemon /healthz: FAIL (no healthy daemon within $((deadline - start))s wall clock — serve log below)" >> "$GITHUB_STEP_SUMMARY"
             cat serve.log
             kill $SERVE_PID 2>/dev/null || true
             exit 1
@@ -347,6 +348,7 @@ jobs:
           # (DEFAULT_PORT changed 8787 -> 23166 in v0.1.16). 90s covers cold
           # PyInstaller extraction + boot on 2-core hosted runners.
           ok=""
+          start=$SECONDS
           deadline=$((SECONDS + 90))
           while [ "$SECONDS" -lt "$deadline" ]; do
             # `|| true` is load-bearing: GitHub injects -e into shell: bash
@@ -361,9 +363,9 @@ jobs:
             sleep 1
           done
           if [ -n "$ok" ]; then
-            echo "- daemon /healthz: PASS (port $PORT, ready within $((SECONDS - deadline + 30))s)" >> "$GITHUB_STEP_SUMMARY"
+            echo "- daemon /healthz: PASS (port $PORT, ready within $((SECONDS - start))s)" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "- daemon /healthz: FAIL (no healthy daemon within $((deadline - SECONDS + 90))s wall clock — serve log below)" >> "$GITHUB_STEP_SUMMARY"
+            echo "- daemon /healthz: FAIL (no healthy daemon within $((deadline - start))s wall clock — serve log below)" >> "$GITHUB_STEP_SUMMARY"
             cat serve.log
             taskkill //F //IM waffle.exe 2>/dev/null || true
             exit 1
