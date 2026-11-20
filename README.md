@@ -11,6 +11,52 @@ Public download channel for **WaffleOS** release binaries. The source code lives
 
 No Python, no command line, no PATH edits required.
 
+## Install on macOS / Linux (manual)
+
+1. Go to [Releases](https://github.com/thepmexpert/waffle-os-releases/releases/latest) and download the archive for your machine, plus the `SHA256SUMS` manifest from the same release:
+   - Apple Silicon Mac: `waffle-macos-arm64.tar.gz`
+   - Intel Mac: `waffle-macos-amd64.tar.gz`
+   - Linux x86-64: `waffle-linux-amd64`
+2. Verify the checksum (the line must end in `OK`), from the folder where you downloaded the assets:
+   ```bash
+   # Apple Silicon Mac
+   grep waffle-macos-arm64.tar.gz SHA256SUMS | shasum -a 256 -c -
+   # Intel Mac
+   grep waffle-macos-amd64.tar.gz SHA256SUMS | shasum -a 256 -c -
+   # Linux x86-64
+   grep waffle-linux-amd64 SHA256SUMS | sha256sum -c -
+   ```
+3. Extract and run (Linux: verify the checksum first, then rename — `sha256sum -c` expects the original asset name):
+   ```bash
+   # Apple Silicon Mac
+   tar -xzf waffle-macos-arm64.tar.gz && ./waffle --help
+   # Intel Mac
+   tar -xzf waffle-macos-amd64.tar.gz && ./waffle --help
+   # Linux x86-64 — raw binary, not an archive
+   mv waffle-linux-amd64 waffle && chmod +x waffle && ./waffle --help
+   ```
+4. Create a vault and start the daemon (always pass an explicit `--root` — the binary refuses to run against the vault bundled inside it):
+   ```bash
+   ./waffle --root ~/waffle-vault init-root
+   (umask 077; printf 'WAFFLE_DAEMON_TOKEN=%s\n' "$(openssl rand -hex 32)" > ~/waffle-vault/.env.local)
+   chmod 600 ~/waffle-vault/.env.local
+   ./waffle --root ~/waffle-vault serve   # daemon on 127.0.0.1:8787; runs in the foreground and blocks this terminal
+   ```
+
+   `serve` keeps running in the foreground — leave that terminal open. In a **second terminal**, verify the daemon is up:
+
+   ```bash
+   curl http://127.0.0.1:8787/healthz     # {"ok":true,...} = up
+   ```
+
+### macOS Gatekeeper note
+
+The macOS binaries are ad-hoc signed and not notarized yet, so Gatekeeper silently blocks a downloaded binary launched from Finder or `open`. After verifying the checksum, use one of these for the first launch — afterwards the binary starts normally:
+
+- run it from Terminal (`./waffle ...`), or
+- `xattr -d com.apple.quarantine ./waffle`, or
+- double-click the binary once so Gatekeeper blocks the launch, then open **System Settings → Privacy & Security**, scroll to the **Security** section, click **Open Anyway**, and confirm with **Open**. (The Finder right-click → **Open** override was removed in macOS Sequoia.)
+
 ## Verify checksums
 
 Every release ships a `SHA256SUMS` manifest:
@@ -23,4 +69,5 @@ Get-FileHash -Algorithm SHA256 .\WaffleOS-Setup-x64-v0.1.15.exe   # PowerShell
 ## Notes
 
 - Assets are attached to releases by CI from the private build repo on every `v*` tag.
+- The resident tray app is currently **Windows-only**; macOS/Linux installs run the `waffle` CLI/daemon without a tray icon.
 - Questions or issues? Contact the maintainers (issues are disabled on this mirror repo).
