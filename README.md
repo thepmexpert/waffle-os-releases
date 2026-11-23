@@ -5,9 +5,9 @@ Public download channel for **WaffleOS** release binaries. The source code lives
 ## Install on Windows
 
 1. Go to [Releases](https://github.com/thepmexpert/waffle-os-releases/releases/latest)
-2. Download `WaffleOS-Setup-x64-v0.1.22.exe`
-3. Double-click, follow the wizard (SmartScreen may ask: choose **More info → Run anyway** — binaries are not code-signed yet)
-4. The setup wizard asks a few questions and starts WaffleOS — a tray icon appears when it is running
+2. Download `WaffleOS-Setup-x64-v0.1.23.exe`
+3. Double-click, follow the installer (SmartScreen may ask: choose **More info → Run anyway** — binaries are not code-signed yet)
+4. Setup installs WaffleOS and the tray icon appears. Open **Settings** from the tray: set an LLM base URL, connect at least one channel (Slack, Teams, Paperclip, or OpenClaw), then **Save changes** — that starts WaffleOS. Until then the daemon waits (by design).
 
 No Python, no command line, no PATH edits required.
 
@@ -17,7 +17,7 @@ Every release ships a `SHA256SUMS` manifest:
 
 ```
 sha256sum -c SHA256SUMS        # Linux / macOS
-Get-FileHash -Algorithm SHA256 .\WaffleOS-Setup-x64-v0.1.22.exe   # PowerShell
+Get-FileHash -Algorithm SHA256 .\WaffleOS-Setup-x64-v0.1.23.exe   # PowerShell
 ```
 
 ## Notes
