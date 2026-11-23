@@ -198,7 +198,12 @@ jobs:
           # fast and offline; TEAMS_APP_PASSWORD satisfies the channel gate
           # and has no runtime consumer, so nothing dials out during the
           # check. Neither may contain `127.0.0.1:<port>` (see header).
-          if [ "$(printf 'v0.1.23\n%s\n' "$TAG" | sort -V | head -n 1)" = "v0.1.23" ]; then
+          # SemVer-aware guard: `sort -V` ranks v0.1.23-rc1 AFTER v0.1.23,
+          # but a prerelease sorts before its release, so compare the core
+          # version and gate prereleases only when it is strictly later.
+          GATE_CORE="${TAG%%-*}"
+          if [ "$(printf 'v0.1.23\n%s\n' "$GATE_CORE" | sort -V | head -n 1)" = "v0.1.23" ] \
+              && { [ "$GATE_CORE" = "$TAG" ] || [ "$GATE_CORE" != "v0.1.23" ]; }; then
             PYTHONUNBUFFERED=1 "$BIN" --root ci-vault serve > serve-deferred.log 2>&1 &
             DPID=$!
             deferred=""
@@ -206,6 +211,8 @@ jobs:
               if ! kill -0 "$DPID" 2>/dev/null; then deferred=1; break; fi
               sleep 1
             done
+            # a defer that lands during the final sleep still counts
+            kill -0 "$DPID" 2>/dev/null || deferred=1
             drc=0
             if [ -z "$deferred" ]; then
               kill "$DPID" 2>/dev/null || true
@@ -400,7 +407,10 @@ jobs:
           # Same contract as the linux+macos leg (see there for rationale):
           # assert the bare-vault defer, then simulate tray Settings → Save.
           # Tags before v0.1.23 start serving on a bare vault: skip.
-          if [ "$(printf 'v0.1.23\n%s\n' "$TAG" | sort -V | head -n 1)" = "v0.1.23" ]; then
+          # Same SemVer-aware guard as the linux+macos leg.
+          GATE_CORE="${TAG%%-*}"
+          if [ "$(printf 'v0.1.23\n%s\n' "$GATE_CORE" | sort -V | head -n 1)" = "v0.1.23" ] \
+              && { [ "$GATE_CORE" = "$TAG" ] || [ "$GATE_CORE" != "v0.1.23" ]; }; then
             PYTHONUNBUFFERED=1 "$APP/waffle.exe" --root "$(cygpath -w "$VAULT")" serve > serve-deferred.log 2>&1 &
             DPID=$!
             deferred=""
@@ -408,6 +418,8 @@ jobs:
               if ! kill -0 "$DPID" 2>/dev/null; then deferred=1; break; fi
               sleep 1
             done
+            # a defer that lands during the final sleep still counts
+            kill -0 "$DPID" 2>/dev/null || deferred=1
             drc=0
             if [ -z "$deferred" ]; then
               kill "$DPID" 2>/dev/null || true
