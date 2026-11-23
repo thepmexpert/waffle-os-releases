@@ -188,39 +188,50 @@ jobs:
           chmod 600 ci-vault/.env.local
 
           # ---- activation gate (waffle-os v0.1.23, PR #231) ----
-          # `serve` no longer starts on a bare vault: it defers (exit 0, no
-          # bind) until an LLM base URL + one channel are configured. Pin
-          # the defer first, then simulate tray Settings → Save (writes to
-          # .env.local) and verify the daemon binds. Placeholders:
+          # From v0.1.23 `serve` no longer starts on a bare vault: it defers
+          # (exit 0, no bind) until an LLM base URL + one channel are
+          # configured. Pin the defer first, then simulate tray Settings →
+          # Save (writes to .env.local) and verify the daemon binds. Tags
+          # before v0.1.23 start serving on a bare vault, so a manual
+          # dispatch for an older tag skips this block. Placeholders:
           # localhost:9 refuses instantly, so any tick-time LLM call fails
           # fast and offline; TEAMS_APP_PASSWORD satisfies the channel gate
           # and has no runtime consumer, so nothing dials out during the
           # check. Neither may contain `127.0.0.1:<port>` (see header).
-          PYTHONUNBUFFERED=1 "$BIN" --root ci-vault serve > serve-deferred.log 2>&1 &
-          DPID=$!
-          deferred=""
-          for _ in $(seq 1 45); do
-            if ! kill -0 "$DPID" 2>/dev/null; then deferred=1; break; fi
-            sleep 1
-          done
-          drc=0
-          if [ -z "$deferred" ]; then
-            kill "$DPID" 2>/dev/null || true
-          fi
-          wait "$DPID" 2>/dev/null || drc=$?
-          if [ -n "$deferred" ] && [ "$drc" -eq 0 ] \
-              && grep -q "serve deferred" serve-deferred.log \
-              && ! grep -q "127\.0\.0\.1:[0-9]" serve-deferred.log; then
-            echo "- serve gate (bare vault defers, no bind): PASS" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "- serve gate (bare vault defers, no bind): FAIL (deferred=${deferred:-no}, exit $drc — log below)" >> "$GITHUB_STEP_SUMMARY"
-            cat serve-deferred.log
-            exit 1
-          fi
+          if [ "$(printf 'v0.1.23\n%s\n' "$TAG" | sort -V | head -n 1)" = "v0.1.23" ]; then
+            PYTHONUNBUFFERED=1 "$BIN" --root ci-vault serve > serve-deferred.log 2>&1 &
+            DPID=$!
+            deferred=""
+            for _ in $(seq 1 90); do
+              if ! kill -0 "$DPID" 2>/dev/null; then deferred=1; break; fi
+              sleep 1
+            done
+            drc=0
+            if [ -z "$deferred" ]; then
+              kill "$DPID" 2>/dev/null || true
+              for _ in $(seq 1 10); do
+                kill -0 "$DPID" 2>/dev/null || break
+                sleep 1
+              done
+              kill -9 "$DPID" 2>/dev/null || true
+            fi
+            wait "$DPID" 2>/dev/null || drc=$?
+            if [ -n "$deferred" ] && [ "$drc" -eq 0 ] \
+                && grep -q "serve deferred" serve-deferred.log \
+                && ! grep -q "127\.0\.0\.1:[0-9]" serve-deferred.log; then
+              echo "- serve gate (bare vault defers, no bind): PASS" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "- serve gate (bare vault defers, no bind): FAIL (deferred=${deferred:-no}, exit $drc — log below)" >> "$GITHUB_STEP_SUMMARY"
+              cat serve-deferred.log
+              exit 1
+            fi
 
-          printf 'WAFFLE_LLM_BASE_URL=%s\n' "http://localhost:9/v1" >> ci-vault/.env.local
-          printf 'TEAMS_APP_PASSWORD=%s\n' "ci-placeholder-not-a-real-secret" >> ci-vault/.env.local
-          echo "- activation (LLM base URL + Teams channel written to .env.local): PASS" >> "$GITHUB_STEP_SUMMARY"
+            printf 'WAFFLE_LLM_BASE_URL=%s\n' "http://localhost:9/v1" >> ci-vault/.env.local
+            printf 'TEAMS_APP_PASSWORD=%s\n' "ci-placeholder-not-a-real-secret" >> ci-vault/.env.local
+            echo "- activation (LLM base URL + Teams channel written to .env.local): PASS" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- serve gate: SKIPPED ($TAG predates the v0.1.23 activation gate)" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
           # PYTHONUNBUFFERED: PyInstaller's child Python block-buffers stdout
           # when redirected; without this a cold-runner boot that misses the
@@ -388,32 +399,42 @@ jobs:
           # ---- activation gate (waffle-os v0.1.23, PR #231) ----
           # Same contract as the linux+macos leg (see there for rationale):
           # assert the bare-vault defer, then simulate tray Settings → Save.
-          PYTHONUNBUFFERED=1 "$APP/waffle.exe" --root "$(cygpath -w "$VAULT")" serve > serve-deferred.log 2>&1 &
-          DPID=$!
-          deferred=""
-          for _ in $(seq 1 45); do
-            if ! kill -0 "$DPID" 2>/dev/null; then deferred=1; break; fi
-            sleep 1
-          done
-          drc=0
-          if [ -z "$deferred" ]; then
-            kill "$DPID" 2>/dev/null || true
-            taskkill //F //IM waffle.exe 2>/dev/null || true
-          fi
-          wait "$DPID" 2>/dev/null || drc=$?
-          if [ -n "$deferred" ] && [ "$drc" -eq 0 ] \
-              && grep -q "serve deferred" serve-deferred.log \
-              && ! grep -q "127\.0\.0\.1:[0-9]" serve-deferred.log; then
-            echo "- serve gate (bare vault defers, no bind): PASS" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "- serve gate (bare vault defers, no bind): FAIL (deferred=${deferred:-no}, exit $drc — log below)" >> "$GITHUB_STEP_SUMMARY"
-            cat serve-deferred.log
-            exit 1
-          fi
+          # Tags before v0.1.23 start serving on a bare vault: skip.
+          if [ "$(printf 'v0.1.23\n%s\n' "$TAG" | sort -V | head -n 1)" = "v0.1.23" ]; then
+            PYTHONUNBUFFERED=1 "$APP/waffle.exe" --root "$(cygpath -w "$VAULT")" serve > serve-deferred.log 2>&1 &
+            DPID=$!
+            deferred=""
+            for _ in $(seq 1 90); do
+              if ! kill -0 "$DPID" 2>/dev/null; then deferred=1; break; fi
+              sleep 1
+            done
+            drc=0
+            if [ -z "$deferred" ]; then
+              kill "$DPID" 2>/dev/null || true
+              for _ in $(seq 1 10); do
+                kill -0 "$DPID" 2>/dev/null || break
+                sleep 1
+              done
+              kill -9 "$DPID" 2>/dev/null || true
+              taskkill //F //IM waffle.exe 2>/dev/null || true
+            fi
+            wait "$DPID" 2>/dev/null || drc=$?
+            if [ -n "$deferred" ] && [ "$drc" -eq 0 ] \
+                && grep -q "serve deferred" serve-deferred.log \
+                && ! grep -q "127\.0\.0\.1:[0-9]" serve-deferred.log; then
+              echo "- serve gate (bare vault defers, no bind): PASS" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "- serve gate (bare vault defers, no bind): FAIL (deferred=${deferred:-no}, exit $drc — log below)" >> "$GITHUB_STEP_SUMMARY"
+              cat serve-deferred.log
+              exit 1
+            fi
 
-          printf 'WAFFLE_LLM_BASE_URL=%s\n' "http://localhost:9/v1" >> "$VAULT/.env.local"
-          printf 'TEAMS_APP_PASSWORD=%s\n' "ci-placeholder-not-a-real-secret" >> "$VAULT/.env.local"
-          echo "- activation (LLM base URL + Teams channel written to .env.local): PASS" >> "$GITHUB_STEP_SUMMARY"
+            printf 'WAFFLE_LLM_BASE_URL=%s\n' "http://localhost:9/v1" >> "$VAULT/.env.local"
+            printf 'TEAMS_APP_PASSWORD=%s\n' "ci-placeholder-not-a-real-secret" >> "$VAULT/.env.local"
+            echo "- activation (LLM base URL + Teams channel written to .env.local): PASS" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- serve gate: SKIPPED ($TAG predates the v0.1.23 activation gate)" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
           # PYTHONUNBUFFERED: see the linux+macos leg — keeps serve.log
           # populated when a cold runner misses the deadline.
