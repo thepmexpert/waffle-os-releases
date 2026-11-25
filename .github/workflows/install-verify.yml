@@ -16,12 +16,22 @@ name: install-verify
 # agents/skills/rules counts from validate output. Do not weaken this:
 # exit codes alone are how the empty-vault install shipped green twice.
 #
+# v0.1.23 lesson (waffle-os PR #231, 2026-11-23): `waffle serve` DEFERS on a
+# vault without an LLM base URL + one channel (exit 0, "serve deferred", no
+# bind) — all three legs timed out at /healthz on an otherwise healthy
+# release (run 45182234518; every upstream check passed). Every leg now
+# (1) asserts the defer on the bare vault, then (2) writes Settings-style
+# activation lines to .env.local and verifies the bind. The placeholder base
+# URL must not contain `127.0.0.1:<port>`: the port derivation below takes
+# the FIRST such match in serve.log and would read the brain line.
+#
 # Windows notes (from setup.iss in thepmexpert/waffle-os):
 #   - PrivilegesRequired=admin; DefaultDirName={autopf}\WaffleOS
 #   - The wizard and tray autostart [Run] entries are `skipifsilent`, so a
 #     silent install is deterministic. This workflow then simulates the
 #     wizard's one required write (WAFFLE_DAEMON_TOKEN into the seeded
-#     per-user vault) and verifies serve + healthz.
+#     per-user vault) and, from v0.1.23, the tray Settings activation
+#     (LLM base URL + one channel), then verifies serve + healthz.
 #   - The installer invocation sets MSYS_NO_PATHCONV=1 so Git Bash passes
 #     the slash-prefixed Inno Setup switches through untouched.
 #   - When waffle-os lands first-run PR2/PR3 (tray SETUP_REQUIRED state +
@@ -177,6 +187,59 @@ jobs:
           printf 'WAFFLE_DAEMON_TOKEN=%s\n' "$(openssl rand -hex 24)" > ci-vault/.env.local
           chmod 600 ci-vault/.env.local
 
+          # ---- activation gate (waffle-os v0.1.23, PR #231) ----
+          # From v0.1.23 `serve` no longer starts on a bare vault: it defers
+          # (exit 0, no bind) until an LLM base URL + one channel are
+          # configured. Pin the defer first, then simulate tray Settings →
+          # Save (writes to .env.local) and verify the daemon binds. Tags
+          # before v0.1.23 start serving on a bare vault, so a manual
+          # dispatch for an older tag skips this block. Placeholders:
+          # localhost:9 refuses instantly, so any tick-time LLM call fails
+          # fast and offline; TEAMS_APP_PASSWORD satisfies the channel gate
+          # and has no runtime consumer, so nothing dials out during the
+          # check. Neither may contain `127.0.0.1:<port>` (see header).
+          # SemVer-aware guard: `sort -V` ranks v0.1.23-rc1 AFTER v0.1.23,
+          # but a prerelease sorts before its release, so compare the core
+          # version and gate prereleases only when it is strictly later.
+          GATE_CORE="${TAG%%-*}"
+          if [ "$(printf 'v0.1.23\n%s\n' "$GATE_CORE" | sort -V | head -n 1)" = "v0.1.23" ] \
+              && { [ "$GATE_CORE" = "$TAG" ] || [ "$GATE_CORE" != "v0.1.23" ]; }; then
+            PYTHONUNBUFFERED=1 "$BIN" --root ci-vault serve > serve-deferred.log 2>&1 &
+            DPID=$!
+            deferred=""
+            for _ in $(seq 1 90); do
+              if ! kill -0 "$DPID" 2>/dev/null; then deferred=1; break; fi
+              sleep 1
+            done
+            # a defer that lands during the final sleep still counts
+            kill -0 "$DPID" 2>/dev/null || deferred=1
+            drc=0
+            if [ -z "$deferred" ]; then
+              kill "$DPID" 2>/dev/null || true
+              for _ in $(seq 1 10); do
+                kill -0 "$DPID" 2>/dev/null || break
+                sleep 1
+              done
+              kill -9 "$DPID" 2>/dev/null || true
+            fi
+            wait "$DPID" 2>/dev/null || drc=$?
+            if [ -n "$deferred" ] && [ "$drc" -eq 0 ] \
+                && grep -q "serve deferred" serve-deferred.log \
+                && ! grep -q "127\.0\.0\.1:[0-9]" serve-deferred.log; then
+              echo "- serve gate (bare vault defers, no bind): PASS" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "- serve gate (bare vault defers, no bind): FAIL (deferred=${deferred:-no}, exit $drc — log below)" >> "$GITHUB_STEP_SUMMARY"
+              cat serve-deferred.log
+              exit 1
+            fi
+
+            printf 'WAFFLE_LLM_BASE_URL=%s\n' "http://localhost:9/v1" >> ci-vault/.env.local
+            printf 'TEAMS_APP_PASSWORD=%s\n' "ci-placeholder-not-a-real-secret" >> ci-vault/.env.local
+            echo "- activation (LLM base URL + Teams channel written to .env.local): PASS" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- serve gate: SKIPPED ($TAG predates the v0.1.23 activation gate)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
           # PYTHONUNBUFFERED: PyInstaller's child Python block-buffers stdout
           # when redirected; without this a cold-runner boot that misses the
           # deadline ships an EMPTY serve.log and the failure is undiagnosable
@@ -202,9 +265,9 @@ jobs:
             sleep 1
           done
           if [ -n "$ok" ]; then
-            echo "- daemon /healthz: PASS (port $PORT, ready within $((SECONDS - start))s)" >> "$GITHUB_STEP_SUMMARY"
+            echo "- daemon /healthz after activation: PASS (port $PORT, ready within $((SECONDS - start))s)" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "- daemon /healthz: FAIL (no healthy daemon within $((deadline - start))s wall clock — serve log below)" >> "$GITHUB_STEP_SUMMARY"
+            echo "- daemon /healthz after activation: FAIL (no healthy daemon within $((deadline - start))s wall clock — serve log below)" >> "$GITHUB_STEP_SUMMARY"
             cat serve.log
             kill $SERVE_PID 2>/dev/null || true
             exit 1
@@ -228,8 +291,8 @@ jobs:
       # ------------------------------------------------------------------
       # Windows: the customer path (checksum-verified Setup exe, silent,
       # elevated). Silent mode skips wizard + tray autostart (skipifsilent),
-      # so we simulate the wizard's token write, then verify tray smoke,
-      # seeded vault, serve, and healthz.
+      # so we simulate the wizard's token write + the Settings activation,
+      # then verify tray smoke, seeded vault, serve, and healthz.
       # ------------------------------------------------------------------
       - name: Verify (windows)
         if: runner.os == 'Windows'
@@ -340,6 +403,51 @@ jobs:
 
           printf 'WAFFLE_DAEMON_TOKEN=%s\n' "$(openssl rand -hex 24)" > "$VAULT/.env.local"
 
+          # ---- activation gate (waffle-os v0.1.23, PR #231) ----
+          # Same contract as the linux+macos leg (see there for rationale):
+          # assert the bare-vault defer, then simulate tray Settings → Save.
+          # Tags before v0.1.23 start serving on a bare vault: skip.
+          # Same SemVer-aware guard as the linux+macos leg.
+          GATE_CORE="${TAG%%-*}"
+          if [ "$(printf 'v0.1.23\n%s\n' "$GATE_CORE" | sort -V | head -n 1)" = "v0.1.23" ] \
+              && { [ "$GATE_CORE" = "$TAG" ] || [ "$GATE_CORE" != "v0.1.23" ]; }; then
+            PYTHONUNBUFFERED=1 "$APP/waffle.exe" --root "$(cygpath -w "$VAULT")" serve > serve-deferred.log 2>&1 &
+            DPID=$!
+            deferred=""
+            for _ in $(seq 1 90); do
+              if ! kill -0 "$DPID" 2>/dev/null; then deferred=1; break; fi
+              sleep 1
+            done
+            # a defer that lands during the final sleep still counts
+            kill -0 "$DPID" 2>/dev/null || deferred=1
+            drc=0
+            if [ -z "$deferred" ]; then
+              kill "$DPID" 2>/dev/null || true
+              for _ in $(seq 1 10); do
+                kill -0 "$DPID" 2>/dev/null || break
+                sleep 1
+              done
+              kill -9 "$DPID" 2>/dev/null || true
+              taskkill //F //IM waffle.exe 2>/dev/null || true
+            fi
+            wait "$DPID" 2>/dev/null || drc=$?
+            if [ -n "$deferred" ] && [ "$drc" -eq 0 ] \
+                && grep -q "serve deferred" serve-deferred.log \
+                && ! grep -q "127\.0\.0\.1:[0-9]" serve-deferred.log; then
+              echo "- serve gate (bare vault defers, no bind): PASS" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "- serve gate (bare vault defers, no bind): FAIL (deferred=${deferred:-no}, exit $drc — log below)" >> "$GITHUB_STEP_SUMMARY"
+              cat serve-deferred.log
+              exit 1
+            fi
+
+            printf 'WAFFLE_LLM_BASE_URL=%s\n' "http://localhost:9/v1" >> "$VAULT/.env.local"
+            printf 'TEAMS_APP_PASSWORD=%s\n' "ci-placeholder-not-a-real-secret" >> "$VAULT/.env.local"
+            echo "- activation (LLM base URL + Teams channel written to .env.local): PASS" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- serve gate: SKIPPED ($TAG predates the v0.1.23 activation gate)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
           # PYTHONUNBUFFERED: see the linux+macos leg — keeps serve.log
           # populated when a cold runner misses the deadline.
           PYTHONUNBUFFERED=1 "$APP/waffle.exe" --root "$(cygpath -w "$VAULT")" serve > serve.log 2>&1 &
@@ -363,9 +471,9 @@ jobs:
             sleep 1
           done
           if [ -n "$ok" ]; then
-            echo "- daemon /healthz: PASS (port $PORT, ready within $((SECONDS - start))s)" >> "$GITHUB_STEP_SUMMARY"
+            echo "- daemon /healthz after activation: PASS (port $PORT, ready within $((SECONDS - start))s)" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "- daemon /healthz: FAIL (no healthy daemon within $((deadline - start))s wall clock — serve log below)" >> "$GITHUB_STEP_SUMMARY"
+            echo "- daemon /healthz after activation: FAIL (no healthy daemon within $((deadline - start))s wall clock — serve log below)" >> "$GITHUB_STEP_SUMMARY"
             cat serve.log
             taskkill //F //IM waffle.exe 2>/dev/null || true
             exit 1
