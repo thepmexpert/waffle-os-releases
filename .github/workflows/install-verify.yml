@@ -301,7 +301,14 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
           set -uo pipefail
-          ASSET="WaffleOS-Setup-x64-$TAG.exe"
+          # Evergreen asset name (releases from v0.1.32 on carry no version in
+          # the filename). Releases up to v0.1.31 shipped
+          # WaffleOS-Setup-x64-<tag>.exe — fall back to the legacy name so
+          # older tags remain verifiable.
+          ASSET="WaffleOS-Setup-x64.exe"
+          if ! gh release view "$TAG" -R "$REPO" --json assets --jq '.assets[].name' | grep -qxF "$ASSET"; then
+            ASSET="WaffleOS-Setup-x64-$TAG.exe"
+          fi
           S="## install-verify (Windows) — $TAG"
           echo "$S" > "$GITHUB_STEP_SUMMARY"
           mkdir -p dl && cd dl
