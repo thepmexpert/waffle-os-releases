@@ -301,12 +301,24 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
           set -uo pipefail
-          # Evergreen asset name (releases from v0.1.32 on carry no version in
-          # the filename). Releases up to v0.1.31 shipped
+          # Evergreen asset name (releases from v0.1.31 on carry no version in
+          # the filename). Releases up to v0.1.30 shipped only
           # WaffleOS-Setup-x64-<tag>.exe — fall back to the legacy name so
           # older tags remain verifiable.
+          # Capture the listing BEFORE the grep (cubic + CodeRabbit,
+          # PR #6 review round 1): under pipefail, `gh ... | grep -q` can
+          # report failure from grep's early exit (gh then dies to SIGPIPE)
+          # or from a transient gh error — both silently select the legacy
+          # name. A failed listing now fails the leg with the gh error
+          # instead of guessing; the fallback applies only to a SUCCESSFUL
+          # listing that omits the evergreen name.
+          asset_names=""
+          if ! asset_names="$(gh release view "$TAG" -R "$REPO" --json assets --jq '.assets[].name')"; then
+            echo "::error::Could not list assets for $TAG on $REPO — a failed lookup is not an absent asset"
+            exit 1
+          fi
           ASSET="WaffleOS-Setup-x64.exe"
-          if ! gh release view "$TAG" -R "$REPO" --json assets --jq '.assets[].name' | grep -qxF "$ASSET"; then
+          if ! grep -qxF "$ASSET" <<<"$asset_names"; then
             ASSET="WaffleOS-Setup-x64-$TAG.exe"
           fi
           S="## install-verify (Windows) — $TAG"
